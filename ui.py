@@ -35,13 +35,13 @@ def _plot_control_from_bytes(image_bytes, width=1100, height=None):
 
 def configure_page(page):
     """Apply the application's global page configuration."""
-    page.title = 'Contamination Reject Pattern Analysis Tool'
+    page.title = 'Process Analysis Tool'
     page.padding = 20
     page.scroll = ft.ScrollMode.AUTO
 
 def create_app_controls(page):
     """Create the application's static controls and return them by name."""
-    title = ft.Text('Contamination Reject Pattern Analysis Tool', size=30, weight=ft.FontWeight.BOLD)
+    title = ft.Text('Process Analysis Tool', size=30, weight=ft.FontWeight.BOLD)
     upload_status = ft.Text('No file selected.', size=14)
     selected_file_text = ft.Text('', size=14)
     device_checkboxes = ft.Column(spacing=5, scroll=ft.ScrollMode.AUTO)
@@ -998,3 +998,411 @@ class ApplicationWorkflow:
         return groups
 
     def _show_method_results(self):
+        show_method_results(ft=ft, result_plot_panel=self.result_plot_panel, method_result=self.method_result, plot_control_from_bytes=_plot_control_from_bytes)
+
+    async def run_method_analysis(self):
+        if self.df is None:
+            self.method_status.value = 'Please upload an Excel file first.'
+            self.page.update()
+            return
+        selected_devices = self.get_selected_input_devices()
+        if not selected_devices:
+            self.method_status.value = 'Please select at least one device.'
+            self.page.update()
+            return
+        try:
+            mode = self.analysis_mode.value
+            z_threshold = self._method_float(self.method_anomaly_z_field, 'Z-score')
+            criteria_groups = self.group_devices_by_criteria(selected_devices)
+            if mode == 'Method 1 — DBSCAN Clustering':
+                eps = self.METHOD1_EPS
+                min_samples = self.METHOD1_MIN_SAMPLES
+                min_cluster_size = self.METHOD1_MIN_CLUSTER_SIZE
+                results = []
+                for criteria, devices in sorted(criteria_groups.items()):
+                    group_population = self._get_analysis_population(devices, self.start_date.value, self.end_date.value)
+                    if group_population.empty:
+                        continue
+                    group_df = self._apply_anomaly_preprocessing(group_population, z_threshold)
+                    if group_df.empty:
+                        continue
+                    result = await asyncio.to_thread(run_method1, df=group_df, device_config=self.device_config, eps=eps, min_samples=min_samples, min_cluster_size=min_cluster_size)
+                    result['plot_png'] = None
+                    results.append((criteria, devices, result))
+                if not results:
+                    raise ValueError('No Criteria group contains data for Method 1 DBSCAN.')
+                self.method_result['method'] = 'Method 1'
+                self.method_result['results'] = results
+                self.device_data.clear()
+                devices_with_data = []
+                selected_population = self._get_analysis_population(selected_devices, self.start_date.value, self.end_date.value)
+                for device in selected_devices:
+                    device_df = selected_population[selected_population['USMDevice'].astype(str) == str(device)].copy()
+                    if device_df.empty:
+                        continue
+                    device_df = self._apply_anomaly_preprocessing(device_df, z_threshold)
+                    if device_df.empty:
+                        continue
+                    devices_with_data.append(device)
+                    self.device_data[device] = {'df': device_df, 'strip_col': get_strip_id_column(device_df)}
+                self.update_result_device_checkboxes(devices_with_data)
+                self.update_result_items()
+                self.result_selection_panel.visible = True
+                self.method_status.value = 'Method 1 DBSCAN completed: ' + '; '.join((f"Criteria {c} ({', '.join(ds)})" for c, ds, _ in results))
+                self.method_export_button.visible = True
+                self.result_plot_panel.content = ft.Text('Select a device and StripID to display the DBSCAN cluster plot.')
+                if self.data_selection_mode.value == 'Batch Helper':
+                    self.result_info.value = f'Batch selection: {len(self.batch_helper_controller.selected_batch_lots):,} lot(s) | Plot selection: {self.method1_top_strip_dropdown.value}'
+                else:
+                    self.result_info.value = f'Plot selection: {self.method1_top_strip_dropdown.value}'
+            elif mode == 'Method 2 — Batch Comparison':
+                top_n = self._method_int(self.method_top_bins_field, 'Top bins')
+                if self.data_selection_mode.value != 'Batch Helper':
+                    raise ValueError('Method 2 requires Batch Helper selection for Reference A and Current B.')
+                if not self.batch_helper_controller.method2_reference_batch_keys:
+                    raise ValueError('Please assign at least one batch to Reference A.')
+                if not self.batch_helper_controller.method2_current_batch_keys:
+                    raise ValueError('Please assign at least one batch to Current B.')
+                results = []
+                for criteria, devices in sorted(criteria_groups.items()):
+                    base_population = self._get_analysis_population(devices, self.start_date.value, self.end_date.value, use_batches=False)
+                    ref_frames = []
+                    cur_frames = []
+                    for device in devices:
+                        source = base_population[base_population['USMDevice'].astype(str) == str(device)].copy()
+                        if source.empty:
+                            continue
+                        ref_lots = self._get_batch_lot_ids(self.batch_helper_controller.method2_reference_batch_keys, device=device)
+                        cur_lots = self._get_batch_lot_ids(self.batch_helper_controller.method2_current_batch_keys, device=device)
+                        ref_df = source[source['MESLotID'].astype(str).isin(ref_lots)].copy()
+                        cur_df = source[source['MESLotID'].astype(str).isin(cur_lots)].copy()
+                        if not ref_df.empty:
+                            ref_frames.append(ref_df)
+                        if not cur_df.empty:
+                            cur_frames.append(cur_df)
+                    if not ref_frames or not cur_frames:
+                        continue
+                    ref_df = pd.concat(ref_frames, ignore_index=True)
+                    cur_df = pd.concat(cur_frames, ignore_index=True)
+                    ref_df['_method2_group'] = 'Reference A'
+                    cur_df['_method2_group'] = 'Current B'
+                    combined = pd.concat([ref_df, cur_df], ignore_index=True)
+                    if self.method_anomaly_checkbox.value:
+                        criteria_map = {str(device): str(config.get('criteria', '')).strip().upper() for device, config in self.device_config.items() if isinstance(config, dict)}
+                        combined = add_strip_anomaly_feature(combined, z_threshold=z_threshold, device_config=self.device_config, criteria_map=criteria_map)
+                        combined = combined[~combined['strip_level_anomaly']].copy()
+                    strips_a = combined.loc[combined['_method2_group'] == 'Reference A', 'StripID'].dropna().unique().tolist()
+                    strips_b = combined.loc[combined['_method2_group'] == 'Current B', 'StripID'].dropna().unique().tolist()
+                    combined = combined.drop(columns=['_method2_group'])
+                    if not strips_a or not strips_b:
+                        continue
+                    result = await asyncio.to_thread(run_method2, df=combined, devices=devices, device_config=self.device_config, strips_a=strips_a, strips_b=strips_b, n_perm=self._method_int(self.method_n_iter_field, 'Iterations'), top_n=top_n, p_threshold=self._method_float(self.method2_p_threshold, 'p threshold'))
+                    result['plot_png'] = await asyncio.to_thread(create_method2_plot, result, ', '.join(devices), criteria=criteria)
+                    results.append((criteria, devices, result))
+                if not results:
+                    raise ValueError('No Criteria group contains both Reference and Current data.')
+                self.method_result['method'] = 'Method 2'
+                self.method_result['results'] = results
+                status_parts = []
+                for criteria, devices, result in results:
+                    stats = result['stats']
+                    status_parts.append(f"Criteria {criteria} | JSD={stats['actual_jsd']:.6f} | p%={stats['p_pct']:.2f} | {('SIGNIFICANT' if stats['significant'] else 'NOT SIGNIFICANT')}")
+                self.method_status.value = 'Method 2 completed: ' + '; '.join(status_parts)
+                self.method_export_button.visible = True
+                self._show_method_results()
+            else:
+                return
+        except Exception as ex:
+            self.method_result['method'] = None
+            self.method_result['results'] = []
+            self.method_export_button.visible = False
+            self.method_status.value = f'Method error: {ex}'
+        self.page.update()
+
+    async def export_method_excel(self, e):
+        if not self.method_result['results']:
+            self.method_status.value = 'Run a method first.'
+            self.page.update()
+            return
+        try:
+            save = await self.method_file_picker.save_file(dialog_title='Export Method Excel', file_name='Method1_DBSCAN_results.xlsx' if self.method_result['method'] == 'Method 1' else 'Method2_results.xlsx', allowed_extensions=['xlsx'])
+            if not save:
+                return
+            if isinstance(save, str):
+                path = save
+            else:
+                path = getattr(save, 'path', None)
+                if not path:
+                    raise ValueError('No export file path was returned.')
+            if self.method_result['method'] == 'Method 1':
+                export_method1_excel(self.method_result['results'], path)
+            else:
+                export_method2_excel(self.method_result['results'], path)
+            self.method_status.value = f'Excel exported: {path}'
+        except Exception as ex:
+            self.method_status.value = f'Export error: {ex}'
+        self.page.update()
+
+    def _set_filter_message(self, message, plot_message=None):
+        self.result_status.value = message
+        if plot_message is not None:
+            self.result_plot_panel.content = ft.Text(plot_message)
+        self.page.update()
+
+    def _validate_filter_inputs(self):
+        if self.df is None:
+            self._set_filter_message('Please upload an Excel file first.')
+            return None
+        selected_devices = self.get_selected_input_devices()
+        if not selected_devices:
+            self._set_filter_message('Please select at least one device.')
+            return None
+        missing_config = [device for device in selected_devices if device not in self.device_config]
+        if missing_config:
+            self.result_status.value = 'Please save device configuration for: ' + ', '.join(missing_config)
+            self.config_status.value = 'Configuration required for: ' + ', '.join(missing_config)
+            self.update_device_config_dropdown(self.detected_devices, preferred_device=missing_config[0])
+            self.page.update()
+            return None
+        try:
+            start = pd.to_datetime(self.start_date.value).normalize()
+            end = pd.to_datetime(self.end_date.value).normalize()
+        except Exception:
+            self._set_filter_message('Invalid date format. Please use YYYY-MM-DD.')
+            return None
+        if start > end:
+            self._set_filter_message('Start date cannot be later than end date.')
+            return None
+        n_days = None
+        if self.analysis_mode.value == 'N-Day Aggregation':
+            try:
+                n_days = int(self.n_day_field.value)
+                if n_days <= 0:
+                    raise ValueError
+            except Exception:
+                self._set_filter_message('Number of days must be a positive integer.')
+                return None
+        return (selected_devices, start, end, n_days)
+
+    def _prepare_filter_population(self, selected_devices, start, end):
+        filtered = self._get_analysis_population(selected_devices, start, end)
+        if filtered.empty:
+            self._set_filter_message('No data found for the selected device(s) and date range.', 'No data available.')
+            return None
+        if self.method_anomaly_checkbox.value:
+            filtered = self._apply_anomaly_preprocessing(filtered, self._method_float(self.method_anomaly_z_field, 'Z-score'))
+            if filtered.empty:
+                self._set_filter_message('No anomalous strips found in the selected population.', 'No anomalous strips available.')
+                return None
+        return filtered
+
+    async def _finalize_filter_results(self, devices_with_data):
+        if not devices_with_data:
+            self._set_filter_message('No data found for the selected devices.')
+            return
+        self.update_result_device_checkboxes(devices_with_data)
+        self.update_result_items()
+        total_records = sum((len(self.device_data[device]['df']) for device in devices_with_data))
+        self.result_status.value = f'Devices: {len(devices_with_data):,} | TA records: {total_records:,}'
+        if self.show_multiple_checkbox.value:
+            self.result_plot_panel.content = ft.Text('Select device(s) and item(s), then click Show Selected.')
+        else:
+            await self.display_single_result()
+        self.page.update()
+
+    async def _run_standard_filter(self):
+        inputs = self._validate_filter_inputs()
+        if inputs is None:
+            return
+        selected_devices, start, end, n_days = inputs
+        filtered = self._prepare_filter_population(selected_devices, start, end)
+        if filtered is None:
+            return
+        strip_col, devices_with_data = prepare_device_analysis_data(filtered, selected_devices, self.analysis_mode.value, start, end, n_days, self.device_data, get_strip_id_column)
+        if strip_col is None:
+            self._set_filter_message('StripID column was not found in the Excel file.')
+            return
+        await self._finalize_filter_results(devices_with_data)
+
+    async def run_filter(self, e):
+        self.start_loading()
+        await asyncio.sleep(0)
+        try:
+            if self.analysis_mode.value in ('Method 1 — DBSCAN Clustering', 'Method 2 — Batch Comparison'):
+                await self.run_method_analysis()
+                return
+            self.result_status.value = ''
+            self.result_plot_panel.content = ft.Text('Processing...')
+            self.result_info.value = ''
+            self.page.update()
+            await self._run_standard_filter()
+        finally:
+            self.stop_loading()
+
+def load_device_config():
+    """Load saved device configuration, falling back to defaults."""
+    if not DEVICE_CONFIG_FILE.exists():
+        return DEFAULT_DEVICE_CONFIG.copy()
+    try:
+        with open(DEVICE_CONFIG_FILE, 'r', encoding='utf-8') as f:
+            saved_config = json.load(f)
+        if not isinstance(saved_config, dict):
+            return DEFAULT_DEVICE_CONFIG.copy()
+        config = {device: values.copy() for device, values in DEFAULT_DEVICE_CONFIG.items()}
+        for device, values in saved_config.items():
+            if isinstance(values, dict):
+                base = config.get(device, {'criteria': 'A'}).copy()
+                base.update(values)
+                config[device] = base
+        return config
+    except Exception:
+        return DEFAULT_DEVICE_CONFIG.copy()
+
+def save_device_config(config):
+    """Save device configuration to JSON."""
+    with open(DEVICE_CONFIG_FILE, 'w', encoding='utf-8') as f:
+        json.dump(config, f, indent=4, ensure_ascii=False)
+
+def get_strip_id_column(dataframe):
+    """Return the StripID column using common casing variants."""
+    possible_names = ['StripID', 'StripId', 'stripID', 'stripId', 'STRIPID']
+    for name in possible_names:
+        if name in dataframe.columns:
+            return name
+    for column in dataframe.columns:
+        if str(column).lower() == 'stripid':
+            return column
+    return None
+
+def build_application(page: ft.Page):
+    configure_page(page)
+    device_config = load_device_config()
+    df = None
+    device_data = {}
+    detected_devices = []
+    controls = create_app_controls(page)
+    title = controls['title']
+    upload_status = controls['upload_status']
+    selected_file_text = controls['selected_file_text']
+    device_checkboxes = controls['device_checkboxes']
+    start_date = controls['start_date']
+    end_date = controls['end_date']
+    data_selection_mode = controls['data_selection_mode']
+    batch_status = controls['batch_status']
+    method2_reference_list = controls['method2_reference_list']
+    method2_current_list = controls['method2_current_list']
+    method2_clear_a_button = controls['method2_clear_a_button']
+    method2_clear_b_button = controls['method2_clear_b_button']
+    method2_reference_column = controls['method2_reference_column']
+    method2_current_column = controls['method2_current_column']
+    method2_batch_assignment = controls['method2_batch_assignment']
+    batch_table = controls['batch_table']
+    batch_find_button = controls['batch_find_button']
+    batch_select_all_button = controls['batch_select_all_button']
+    batch_clear_all_button = controls['batch_clear_all_button']
+    batch_use_button = controls['batch_use_button']
+    batch_hide_button = controls['batch_hide_button']
+    batch_helper_header = controls['batch_helper_header']
+    batch_helper_container = controls['batch_helper_container']
+    batch_show_button = controls['batch_show_button']
+    analysis_mode = controls['analysis_mode']
+    n_day_field = controls['n_day_field']
+    METHOD1_EPS = controls['METHOD1_EPS']
+    METHOD1_MIN_SAMPLES = controls['METHOD1_MIN_SAMPLES']
+    METHOD1_MIN_CLUSTER_SIZE = controls['METHOD1_MIN_CLUSTER_SIZE']
+    method1_top_strip_dropdown = controls['method1_top_strip_dropdown']
+    method_top_bins_field = controls['method_top_bins_field']
+    method_n_iter_field = controls['method_n_iter_field']
+    method_anomaly_checkbox = controls['method_anomaly_checkbox']
+    method_anomaly_z_field = controls['method_anomaly_z_field']
+    method2_reference_start = controls['method2_reference_start']
+    method2_reference_end = controls['method2_reference_end']
+    method2_current_start = controls['method2_current_start']
+    method2_current_end = controls['method2_current_end']
+    method2_p_threshold = controls['method2_p_threshold']
+    method_export_button = controls['method_export_button']
+    method_status = controls['method_status']
+    global_loading_ring = controls['global_loading_ring']
+    global_loading_text = controls['global_loading_text']
+    global_loading_row = controls['global_loading_row']
+    start_loading = controls['start_loading']
+    stop_loading = controls['stop_loading']
+    method_result = controls['method_result']
+    device_config_dropdown = controls['device_config_dropdown']
+    config_device_name_field = controls['config_device_name_field']
+    config_rows_field = controls['config_rows_field']
+    config_cols_field = controls['config_cols_field']
+    config_panel_size_field = controls['config_panel_size_field']
+    config_criteria_dropdown = controls['config_criteria_dropdown']
+    config_status = controls['config_status']
+    config_save_button = controls['config_save_button']
+    device_config_container = controls['device_config_container']
+    result_status = controls['result_status']
+    result_device_checkboxes = controls['result_device_checkboxes']
+    result_item_checkboxes = controls['result_item_checkboxes']
+    show_multiple_checkbox = controls['show_multiple_checkbox']
+    select_all_button = controls['select_all_button']
+    clear_all_button = controls['clear_all_button']
+    show_selected_button = controls['show_selected_button']
+    result_info = controls['result_info']
+    result_plot_panel = controls['result_plot_panel']
+    batch_add_a_button = ft.Button(content='Add Selected → A', visible=False)
+    batch_add_b_button = ft.Button(content='Add Selected → B', visible=False)
+    batch_helper_header.controls.insert(4, batch_add_a_button)
+    batch_helper_header.controls.insert(5, batch_add_b_button)
+    device_config_controller = DeviceConfigController(ft=ft, page=page, device_config=device_config, save_device_config=save_device_config, device_config_dropdown=device_config_dropdown, config_device_name_field=config_device_name_field, config_rows_field=config_rows_field, config_cols_field=config_cols_field, config_panel_size_field=config_panel_size_field, config_criteria_dropdown=config_criteria_dropdown, config_status=config_status, get_detected_devices=lambda: detected_devices, update_input_checkboxes=lambda devices: None)
+    batch_helper_controller = BatchHelperController(ft=ft, page=page, get_selected_devices=lambda: device_config_controller.get_selected_input_devices(device_checkboxes), start_date=start_date, end_date=end_date, analysis_mode=analysis_mode, batch_status=batch_status, batch_table=batch_table, batch_helper_container=batch_helper_container, batch_show_button=batch_show_button, batch_use_button=batch_use_button, batch_add_a_button=batch_add_a_button, batch_add_b_button=batch_add_b_button, method2_batch_assignment=method2_batch_assignment, method2_reference_list=method2_reference_list, method2_current_list=method2_current_list, data_selection_mode=data_selection_mode)
+    get_selected_input_devices = lambda: device_config_controller.get_selected_input_devices(device_checkboxes)
+    update_device_checkboxes = lambda devices: device_config_controller.update_device_checkboxes(device_checkboxes, devices, batch_helper_controller.batch_input_selection_changed)
+    update_device_config_dropdown = device_config_controller.update_device_config_dropdown
+    refresh_batch_helper = batch_helper_controller.refresh_batch_helper
+    device_config_dropdown.on_select = device_config_controller.device_config_changed
+    config_save_button.on_click = device_config_controller.save_current_device_config
+    data_selection_mode.on_select = batch_helper_controller.data_selection_mode_changed
+    start_date.on_change = batch_helper_controller.batch_input_selection_changed
+    end_date.on_change = batch_helper_controller.batch_input_selection_changed
+    batch_find_button.on_click = lambda e: batch_helper_controller.refresh_batch_helper()
+    batch_select_all_button.on_click = lambda e: batch_helper_controller.select_all_batches()
+    batch_clear_all_button.on_click = lambda e: batch_helper_controller.clear_all_batches()
+    batch_use_button.on_click = batch_helper_controller.batch_use_clicked
+    batch_hide_button.on_click = lambda e: batch_helper_controller.hide_batch_helper()
+    batch_show_button.on_click = lambda e: batch_helper_controller.show_batch_helper()
+    batch_add_a_button.on_click = lambda e: batch_helper_controller.add_selected_to_method2('A')
+    batch_add_b_button.on_click = lambda e: batch_helper_controller.add_selected_to_method2('B')
+    method2_clear_a_button.on_click = lambda e: batch_helper_controller.clear_method2_group('A')
+    method2_clear_b_button.on_click = lambda e: batch_helper_controller.clear_method2_group('B')
+    file_picker = ft.FilePicker()
+    page.services.append(file_picker)
+    method_file_picker = ft.FilePicker()
+    page.services.append(method_file_picker)
+    input_device_container = ft.Container(content=ft.Column([ft.Text('Device', size=16, weight=ft.FontWeight.BOLD), device_checkboxes], spacing=5), width=380)
+    item_label = ft.Text('StripID', size=16, weight=ft.FontWeight.BOLD)
+    result_selection_panel = ft.Container(content=ft.Column([ft.Text('Selection', size=20, weight=ft.FontWeight.BOLD), ft.Text('Devices', size=16, weight=ft.FontWeight.BOLD), result_device_checkboxes, show_multiple_checkbox, item_label, result_item_checkboxes, ft.Row([select_all_button, clear_all_button], spacing=5), show_selected_button, result_info], spacing=10), width=360, padding=15)
+    result_row = ft.Row([result_selection_panel, ft.VerticalDivider(width=1), result_plot_panel], vertical_alignment=ft.CrossAxisAlignment.START, expand=False)
+    result_display_controller = ResultDisplayController(ft=ft, asyncio_module=asyncio, page=page, analysis_mode=analysis_mode, method1_top_strip_dropdown=method1_top_strip_dropdown, device_data=device_data, method_result=method_result, result_device_checkboxes=result_device_checkboxes, result_item_checkboxes=result_item_checkboxes, result_plot_panel=result_plot_panel, result_info=result_info, item_label=item_label, select_all_button=select_all_button, clear_all_button=clear_all_button, show_selected_button=show_selected_button, show_multiple_checkbox=show_multiple_checkbox, device_config=device_config, plot_device_map=plot_device_map, create_method1_plot=create_method1_plot, plot_control_from_bytes=lambda image_bytes, width=1100, height=None: plot_control_from_bytes(ft, image_bytes, width, height))
+    get_result_selected_devices = result_display_controller.get_result_selected_devices
+    get_result_selected_items = result_display_controller.get_result_selected_items
+    update_result_items = result_display_controller.update_result_items
+    update_result_device_checkboxes = result_display_controller.update_result_device_checkboxes
+    select_all_items = result_display_controller.select_all_items
+    clear_all_items = result_display_controller.clear_all_items
+    display_single_result = result_display_controller.display_single_result
+    display_multiple_results = result_display_controller.display_multiple_results
+    show_selected = result_display_controller.show_selected
+    result_device_changed = result_display_controller.result_device_changed
+    result_item_changed = result_display_controller.result_item_changed
+    show_multiple_changed = result_display_controller.show_multiple_changed
+    workflow_context = {'METHOD1_EPS': METHOD1_EPS, 'METHOD1_MIN_CLUSTER_SIZE': METHOD1_MIN_CLUSTER_SIZE, 'METHOD1_MIN_SAMPLES': METHOD1_MIN_SAMPLES, 'analysis_mode': analysis_mode, 'batch_helper_container': batch_helper_container, 'batch_helper_controller': batch_helper_controller, 'batch_show_button': batch_show_button, 'batch_table': batch_table, 'config_status': config_status, 'data_selection_mode': data_selection_mode, 'detected_devices': detected_devices, 'device_config': device_config, 'device_data': device_data, 'df': df, 'display_single_result': display_single_result, 'end_date': end_date, 'file_picker': file_picker, 'get_selected_input_devices': get_selected_input_devices, 'method1_top_strip_dropdown': method1_top_strip_dropdown, 'method2_p_threshold': method2_p_threshold, 'method_anomaly_checkbox': method_anomaly_checkbox, 'method_anomaly_z_field': method_anomaly_z_field, 'method_export_button': method_export_button, 'method_file_picker': method_file_picker, 'method_n_iter_field': method_n_iter_field, 'method_result': method_result, 'method_status': method_status, 'method_top_bins_field': method_top_bins_field, 'n_day_field': n_day_field, 'page': page, 'result_device_checkboxes': result_device_checkboxes, 'result_info': result_info, 'result_item_checkboxes': result_item_checkboxes, 'result_plot_panel': result_plot_panel, 'result_selection_panel': result_selection_panel, 'result_status': result_status, 'selected_file_text': selected_file_text, 'show_multiple_checkbox': show_multiple_checkbox, 'start_date': start_date, 'start_loading': start_loading, 'stop_loading': stop_loading, 'update_device_checkboxes': update_device_checkboxes, 'update_device_config_dropdown': update_device_config_dropdown, 'update_result_device_checkboxes': update_result_device_checkboxes, 'update_result_items': update_result_items, 'upload_status': upload_status}
+    workflow = ApplicationWorkflow(workflow_context)
+    method_export_button.on_click = workflow.export_method_excel
+    analysis_selection_controller = AnalysisSelectionController(page=page, analysis_mode=analysis_mode, n_day_field=n_day_field, method1_top_strip_dropdown=method1_top_strip_dropdown, method_top_bins_field=method_top_bins_field, method_n_iter_field=method_n_iter_field, method_anomaly_checkbox=method_anomaly_checkbox, method_anomaly_z_field=method_anomaly_z_field, method2_reference_start=method2_reference_start, method2_reference_end=method2_reference_end, method2_current_start=method2_current_start, method2_current_end=method2_current_end, method2_p_threshold=method2_p_threshold, method2_batch_assignment=method2_batch_assignment, batch_add_a_button=batch_add_a_button, batch_add_b_button=batch_add_b_button, data_selection_mode=data_selection_mode, batch_use_button=batch_use_button, batch_helper_container=batch_helper_container, result_selection_panel=result_selection_panel, result_plot_panel=result_plot_panel, result_info=result_info, method_export_button=method_export_button, get_batch_source_df=lambda: batch_helper_controller.batch_source_df, get_device_data=lambda: device_data, get_method_result=lambda: method_result, refresh_batch_helper=refresh_batch_helper, update_result_items=update_result_items)
+    analysis_mode.on_select = analysis_selection_controller.analysis_mode_changed
+    method1_top_strip_dropdown.on_select = analysis_selection_controller.method1_top_strip_changed
+    show_selected_button.on_click = show_selected
+    show_multiple_checkbox.on_change = show_multiple_changed
+    select_all_button.on_click = select_all_items
+    clear_all_button.on_click = clear_all_items
+    update_device_config_dropdown()
+    upload_button = ft.Button(content='Upload Excel', icon=ft.Icons.UPLOAD_FILE, on_click=workflow.pick_excel)
+    plot_button = ft.Button(content='Apply Filter & Plot', icon=ft.Icons.FILTER_ALT, on_click=workflow.run_filter)
+    page.add(title, ft.Divider(), ft.Text('1. Data Input', size=24, weight=ft.FontWeight.BOLD), ft.Row([upload_button, selected_file_text], spacing=15), upload_status, ft.Divider(), ft.Text('2. Analysis Selection', size=24, weight=ft.FontWeight.BOLD), ft.Row([input_device_container, start_date, end_date, data_selection_mode], spacing=12, vertical_alignment=ft.CrossAxisAlignment.START), ft.Row([analysis_mode, n_day_field, batch_show_button], spacing=12), batch_helper_container, ft.Row([method1_top_strip_dropdown, method_top_bins_field, method_n_iter_field], spacing=10, wrap=True), ft.Row([method2_reference_start, method2_reference_end, method2_current_start, method2_current_end, method2_p_threshold], spacing=10, wrap=True), ft.Row([method_anomaly_checkbox, method_anomaly_z_field, method_export_button], spacing=10, wrap=True), global_loading_row, method_status, device_config_container, ft.Container(content=plot_button, padding=ft.Padding.only(top=10, bottom=10)), result_status, ft.Divider(), ft.Text('3. Result', size=24, weight=ft.FontWeight.BOLD), result_row)
