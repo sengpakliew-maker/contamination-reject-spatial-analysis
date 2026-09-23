@@ -1,5 +1,9 @@
+"""Core spatial and statistical analysis for Phase 10."""
+
 from __future__ import annotations
+
 import io
+
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
@@ -8,100 +12,42 @@ import pandas as pd
 from scipy.ndimage import gaussian_filter
 from scipy.spatial.distance import jensenshannon
 from sklearn.cluster import DBSCAN
-from matplotlib.collections import LineCollection
-
-def _build_panel_layout(grid, panel_size):
-    """Build the plotting grid without changing the original panel layout."""
-    rows, cols = grid.shape
-    parts = [
-        grid[:, start:start + panel_size]
-        for start in range(0, cols, panel_size)
-    ]
-
-    if len(parts) != 4 or any(part.shape[1] != panel_size for part in parts):
-        raise ValueError(
-            f"Expected four panels of width {panel_size}, got grid shape {grid.shape}."
-        )
-
-    gap = np.zeros((rows, 2), dtype=grid.dtype)
-    result = [parts[0]]
-    for panel in parts[1:]:
-        result.extend((gap, panel))
-
-    return np.hstack(result)
-
-
-def _draw_panel_grid(ax, rows, panel_size, total_width):
-    segments = []
-    current_x = 0
-
-    for _ in range(4):
-        for x in range(panel_size + 1):
-            x_pos = current_x + x - 0.5
-            segments.append(
-                [(x_pos, -0.5), (x_pos, rows - 0.5)]
-            )
-
-        for y in range(rows + 1):
-            y_pos = y - 0.5
-            segments.append(
-                [
-                    (current_x - 0.5, y_pos),
-                    (current_x + panel_size - 0.5, y_pos),
-                ]
-            )
-
-        current_x += panel_size + 2
-
-    ax.add_collection(
-        LineCollection(
-            segments,
-            colors="black",
-            linewidths=(
-                [1.0] * (panel_size + 1) + [0.5] * (rows + 1)
-            ) * 4,
-            antialiased=False,
-        )
-    )
-
-
-def _draw_positive_labels(ax, grid):
-    """Draw the same positive-cell labels while skipping empty cells."""
-    occupied = np.argwhere(
-        np.isfinite(grid) & (grid > 0)
-    )
-
-    for row, col in occupied:
-        ax.text(
-            int(col),
-            int(row),
-            int(grid[row, col]),
-            ha="center",
-            va="center",
-            fontsize=8,
-        )
-
 
 def plot_panel_map(grid, ax, panel_size, smooth=False, sigma=1.5):
-    new_grid = _build_panel_layout(
-        np.asarray(grid),
-        int(panel_size),
-    )
+
+    # --- build panel layout ---
+    new_grid = []
+
+    for b in range(4):
+        start = b * panel_size
+        end = start + panel_size
+
+        new_grid.append(grid[:, start:end])
+
+        # gap between panels
+        if b < 3:
+            new_grid.append(
+                np.full((grid.shape[0], 2), 0)
+            )
+
+    new_grid = np.hstack(new_grid)
 
     max_A = np.max(new_grid)
 
+    # --- optional smoothing ---
     if smooth:
         plot_grid = gaussian_filter(
             new_grid,
-            sigma=sigma,
+            sigma=sigma
         )
 
         im = ax.imshow(
             plot_grid,
             cmap="Reds",
             origin="lower",
-            aspect="equal",
+            aspect="equal"
         )
+
     else:
         plot_grid = new_grid
 
@@ -110,21 +56,52 @@ def plot_panel_map(grid, ax, panel_size, smooth=False, sigma=1.5):
             cmap="Reds",
             origin="lower",
             vmax=max_A + 3,
-            aspect="equal",
+            aspect="equal"
         )
 
-    _draw_panel_grid(
-        ax,
-        rows=new_grid.shape[0],
-        panel_size=int(panel_size),
-        total_width=new_grid.shape[1],
-    )
+    # --- draw panel grid lines ---
+    current_x = 0
 
-    _draw_positive_labels(
-        ax,
-        new_grid,
-    )
+    for b in range(4):
 
+        # vertical lines
+        for x in range(panel_size + 1):
+            ax.axvline(
+                current_x + x - 0.5,
+                color="black",
+                linewidth=1
+            )
+
+        # horizontal lines
+        for y in range(grid.shape[0] + 1):
+            ax.axhline(
+                y - 0.5,
+                xmin=(current_x) / new_grid.shape[1],
+                xmax=(current_x + panel_size) / new_grid.shape[1],
+                color="black",
+                linewidth=0.5
+            )
+
+        current_x += panel_size + 2
+
+    # --- numbers inside grid ---
+    for i in range(new_grid.shape[0]):
+        for j in range(new_grid.shape[1]):
+
+            if (
+                not np.isnan(new_grid[i, j])
+                and new_grid[i, j] > 0
+            ):
+                ax.text(
+                    j,
+                    i,
+                    int(new_grid[i, j]),
+                    ha="center",
+                    va="center",
+                    fontsize=8
+                )
+
+    # --- formatting ---
     ax.axis("off")
     ax.invert_xaxis()
     ax.invert_yaxis()
@@ -141,6 +118,11 @@ def plot_device_map(
     smooth=False,
     sigma=1.5
 ):
+
+    # ---------------------------------------------------------
+    # Get device configuration from app.py
+    # ---------------------------------------------------------
+
     if device_name not in device_config:
         raise ValueError(
             f"Unknown device: {device_name}"
@@ -148,31 +130,78 @@ def plot_device_map(
 
     config = device_config[device_name]
 
-    rows = int(config["rows"])
-    cols = int(config["cols"])
-    panel_size = int(config["panel_size"])
+    rows = config["rows"]
+    cols = config["cols"]
+    panel_size = config["panel_size"]
+
+    # ---------------------------------------------------------
+    # Create empty grid
+    # ---------------------------------------------------------
+
+    grid = np.zeros(
+        (rows, cols)
+    )
+
+    # ---------------------------------------------------------
+    # No filter -> use all rows
+    # ---------------------------------------------------------
 
     if row_mask is None:
-        work = df
+
+        x = (
+            df["stripX"]
+            .to_numpy()
+            - 1
+        )
+
+        y = (
+            df["stripY"]
+            .to_numpy()
+            - 1
+        )
+
     else:
-        work = df.loc[row_mask]
 
-    x = work["stripX"].to_numpy(dtype=np.intp, copy=False) - 1
-    y = work["stripY"].to_numpy(dtype=np.intp, copy=False) - 1
+        x = (
+            df.loc[
+                row_mask,
+                "stripX"
+            ]
+            .to_numpy()
+            - 1
+        )
 
-    flat_indices = y * cols + x
-    grid = np.bincount(
-        flat_indices,
-        minlength=rows * cols,
-    ).reshape(rows, cols)
+        y = (
+            df.loc[
+                row_mask,
+                "stripY"
+            ]
+            .to_numpy()
+            - 1
+        )
+
+    # ---------------------------------------------------------
+    # Accumulate counts
+    # ---------------------------------------------------------
+
+    np.add.at(
+        grid,
+        (y, x),
+        1
+    )
+
+    # ---------------------------------------------------------
+    # Use ORIGINAL plotting template
+    # ---------------------------------------------------------
 
     return plot_panel_map(
         grid,
         ax,
         panel_size=panel_size,
         smooth=smooth,
-        sigma=sigma,
+        sigma=sigma
     )
+
 
 def transform_panel_coordinates(df, device_name, device_config):
     df = df.copy()
@@ -183,6 +212,9 @@ def transform_panel_coordinates(df, device_name, device_config):
     cfg = device_config[device_name]
     rows = int(cfg["rows"])
     panel_size = int(cfg["panel_size"])
+
+    if "stripX" not in df.columns or "stripY" not in df.columns:
+        raise ValueError("Input data must contain stripX and stripY columns.")
 
     df["panel"] = ((df["stripX"] - 1) // panel_size).astype(int)
     df["panel_x"] = ((df["stripX"] - 1) - df["panel"] * panel_size)
@@ -269,10 +301,42 @@ def plot_jsd_contribution_map(
     top_n=10,
     title=None,
 ):
+    """
+    Shared JSD contribution map for Method 1 and Method 2.
+
+    DISPLAY CONVENTION
+    -------------------
+
+    Panels are displayed in ONE horizontal row:
+
+        Panel 4 | Panel 3 | Panel 2 | Panel 1
+
+    Therefore Panel 1 is physically on the RIGHT.
+
+    Within EACH panel:
+
+        col_bin = 0  -> RIGHT
+        col_bin ↑    -> LEFT
+
+        row_bin = 0  -> TOP
+        row_bin ↑    -> BOTTOM
+
+    Internal panel values are NOT changed.
+
+        internal 0 -> physical Panel 1
+        internal 1 -> physical Panel 2
+        internal 2 -> physical Panel 3
+        internal 3 -> physical Panel 4
+
+    This function only changes visualization.
+    """
+
     from matplotlib import colors
     from matplotlib.patches import Rectangle
 
-
+    # ========================================================
+    # 1. VALIDATE INPUT
+    # ========================================================
 
     if (
         contribution_df is None
@@ -284,6 +348,10 @@ def plot_jsd_contribution_map(
         return
 
     df = contribution_df.copy()
+
+    # ========================================================
+    # 2. IDENTIFY VALUE COLUMN
+    # ========================================================
 
     if "signed_jsd_contribution" in df.columns:
 
@@ -308,6 +376,10 @@ def plot_jsd_contribution_map(
             "column found."
         )
 
+    # ========================================================
+    # 3. RANK TOP N BINS
+    # ========================================================
+    #
     # Ranking is based on JSD contribution magnitude.
     #
     # Do NOT rank based on signed value.
@@ -358,6 +430,9 @@ def plot_jsd_contribution_map(
         top["bin_id"]
     )
 
+    # ========================================================
+    # 4. COLOR SCALE
+    # ========================================================
 
     values = pd.to_numeric(
         df[value_col],
@@ -392,12 +467,26 @@ def plot_jsd_contribution_map(
         vmax=vmax,
     )
 
+    # ========================================================
+    # 6. PHYSICAL DISPLAY ORDER
+    # ========================================================
+    #
+    # LEFT → RIGHT:
+    #
+    #     Panel 4 | Panel 3 | Panel 2 | Panel 1
+    #
+    # ========================================================
+
     physical_panel_order = [
         4,
         3,
         2,
         1,
     ]
+
+    # ========================================================
+    # 7. CREATE ONE HORIZONTAL ROW
+    # ========================================================
 
     fig, axes = plt.subplots(
         1,
@@ -408,12 +497,19 @@ def plot_jsd_contribution_map(
 
     axes = axes[0]
 
+    # ========================================================
+    # 8. PLOT EACH PHYSICAL PANEL
+    # ========================================================
 
     for plot_index, physical_panel in enumerate(
         physical_panel_order
     ):
 
         ax = axes[plot_index]
+
+        # ----------------------------------------------------
+        # Physical panel -> internal panel
+        # ----------------------------------------------------
 
         internal_panel = (
             physical_panel - 1
@@ -424,6 +520,10 @@ def plot_jsd_contribution_map(
             ==
             internal_panel
         ].copy()
+
+        # ====================================================
+        # BUILD HEATMAP
+        # ====================================================
 
         heat = np.full(
             (
@@ -500,6 +600,10 @@ def plot_jsd_contribution_map(
 
         ax.invert_xaxis()
 
+        # ====================================================
+        # HIGHLIGHT TOP N
+        # ====================================================
+
         for r in range(
             grid_size
         ):
@@ -545,6 +649,9 @@ def plot_jsd_contribution_map(
                     ]
                 )
 
+                # --------------------------------------------
+                # Magnitude
+                # --------------------------------------------
 
                 if (
                     "mean_jsd"
@@ -582,6 +689,9 @@ def plot_jsd_contribution_map(
                         )
                     )
 
+                # --------------------------------------------
+                # Direction
+                # --------------------------------------------
 
                 if (
                     "mean_delta"
@@ -620,12 +730,19 @@ def plot_jsd_contribution_map(
 
                     direction = "-"
 
+                # --------------------------------------------
+                # Label
+                # --------------------------------------------
+
                 label = (
                     f"#{rank}\n"
                     f"{direction}"
                     f"{magnitude:.2f}%"
                 )
 
+                # =================================================
+                # TEXT COLOR BASED ON BACKGROUND
+                # =================================================
 
                 rgba = plt.cm.RdBu_r(
                     norm(
@@ -663,6 +780,10 @@ def plot_jsd_contribution_map(
                     color=text_color,
                 )
 
+                # =================================================
+                # RED BORDER
+                # =================================================
+
                 ax.add_patch(
                     Rectangle(
                         (
@@ -677,6 +798,10 @@ def plot_jsd_contribution_map(
                     )
                 )
 
+        # ====================================================
+        # 9. PANEL TITLE
+        # ====================================================
+
         ax.set_title(
             f"Panel {physical_panel}",
             fontsize=11,
@@ -686,6 +811,10 @@ def plot_jsd_contribution_map(
 
         ax.set_xticks([])
         ax.set_yticks([])
+
+    # ========================================================
+    # 13. FIGURE TITLE
+    # ========================================================
 
     if title is None:
 
@@ -700,13 +829,9 @@ def plot_jsd_contribution_map(
         y=1.02,
     )
 
-    plt.subplots_adjust(
-        left=0.02,
-        right=0.98,
-        bottom=0.08,
-        top=0.82,
-        wspace=0.08,
-    )
+    # ========================================================
+    # 14. LAYOUT
+    # ========================================================
 
     plt.subplots_adjust(
         left=0.02,
@@ -716,6 +841,21 @@ def plot_jsd_contribution_map(
         wspace=0.08,
     )
 
+    # ========================================================
+    # 14. LAYOUT
+    # ========================================================
+
+    plt.subplots_adjust(
+        left=0.02,
+        right=0.98,
+        bottom=0.08,
+        top=0.82,
+        wspace=0.08,
+    )
+
+    # Return the exact notebook template as PNG bytes instead of
+    # displaying it with plt.show(). The plotting template above is
+    # intentionally unchanged.
     buffer = io.BytesIO()
     fig.savefig(
         buffer,
@@ -868,6 +1008,11 @@ def analyze_spatial_clusters(
     Clustering is performed separately for each device, lot, strip,
     and panel using the raw stripX / stripY coordinates.
     """
+    required = ["USMDevice", "MESLotID", "StripID", "stripX", "stripY"]
+    missing = [c for c in required if c not in df.columns]
+    if missing:
+        raise ValueError(f"Missing required columns for DBSCAN: {', '.join(missing)}")
+
     cluster_records = []
     strip_records = []
     cluster_points_records = []
@@ -990,6 +1135,11 @@ def _ensure_cluster_panel_column(df, device_config):
     """Add the raw-coordinate panel index without changing stripX/stripY."""
     out = df.copy()
 
+    if "USMDevice" not in out.columns:
+        raise ValueError("USMDevice is required to determine panel geometry.")
+    if "stripX" not in out.columns:
+        raise ValueError("stripX is required to determine panel geometry.")
+
     if not isinstance(device_config, dict):
         raise ValueError("Device configuration is required for Method 1 DBSCAN.")
 
@@ -998,3 +1148,310 @@ def _ensure_cluster_panel_column(df, device_config):
         try:
             panel_sizes[str(device)] = int(cfg["panel_size"])
         except (KeyError, TypeError, ValueError):
+            continue
+
+    device_series = out["USMDevice"].astype(str)
+    panel_size_series = device_series.map(panel_sizes)
+    strip_x = pd.to_numeric(out["stripX"], errors="coerce")
+
+    out["panel"] = ((strip_x - 1) // panel_size_series)
+
+    if out["panel"].isna().any():
+        missing_devices = sorted(
+            device_series[out["panel"].isna()].unique()
+        )
+        raise ValueError(
+            f"No valid panel_size configuration found for: "
+            f"{', '.join(missing_devices)}"
+        )
+
+    out["panel"] = out["panel"].astype(int)
+    return out
+
+
+def run_method1(df, devices=None, device_config=None, eps=2.24, min_samples=3, min_cluster_size=3):
+    """Run Method 1 using DBSCAN spatial clustering."""
+    if devices is None:
+        devices = df["USMDevice"].dropna().astype(str).unique().tolist()
+        data = df.copy()
+    else:
+        devices = [str(d) for d in devices]
+        if not devices:
+            raise ValueError("At least one device is required for Method 1.")
+        data = df[df["USMDevice"].astype(str).isin(set(devices))].copy()
+    if data.empty:
+        raise ValueError("No data available for the selected devices.")
+
+    data["stripX"] = pd.to_numeric(data["stripX"], errors="coerce")
+    data["stripY"] = pd.to_numeric(data["stripY"], errors="coerce")
+    data = data.dropna(subset=["USMDevice", "MESLotID", "StripID", "stripX", "stripY"]).copy()
+    data = _ensure_cluster_panel_column(data, device_config)
+
+    cluster_df, strip_summary, cluster_points_df = analyze_spatial_clusters(
+        data, eps=eps, min_samples=min_samples, min_cluster_size=min_cluster_size
+    )
+
+    result = {
+        "data": data,
+        "cluster_df": cluster_df,
+        "strip_summary": strip_summary,
+        "cluster_point_df": cluster_points_df,
+        "devices": devices,
+        "device_config": device_config,
+        "eps": eps,
+        "min_samples": min_samples,
+        "min_cluster_size": min_cluster_size,
+    }
+
+    if not strip_summary.empty:
+        top = strip_summary.iloc[0]
+        result["plot_strip_id"] = top["StripID"]
+        result["plot_device"] = str(top["USMDevice"])
+
+    return result
+
+
+def plot_dbscan_clusters(df, cluster_points_df, strip_id, device_name, ax, device_config=None):
+    """Plot a strip reject map and overlay its meaningful DBSCAN clusters."""
+    default_configs = {
+        "SOLARIS-XRF3": (17, 76, 19),
+        "VEGA": (15, 64, 16),
+        "SQUID-ICD82PRV": (17, 72, 18),
+    }
+    if isinstance(device_config, dict) and device_name in device_config:
+        cfg = device_config[device_name]
+        rows = int(cfg["rows"])
+        cols = int(cfg["cols"])
+        panel_size = int(cfg["panel_size"])
+    elif device_name in default_configs:
+        rows, cols, panel_size = default_configs[device_name]
+    else:
+        raise ValueError(f"No device geometry found for {device_name}.")
+
+    strip_df = df[
+        df["StripID"].eq(strip_id) & df["USMDevice"].astype(str).eq(str(device_name))
+    ].copy()
+    grid = np.zeros((rows, cols))
+    x = pd.to_numeric(strip_df["stripX"], errors="coerce").to_numpy() - 1
+    y = pd.to_numeric(strip_df["stripY"], errors="coerce").to_numpy() - 1
+    valid = np.isfinite(x) & np.isfinite(y) & (x >= 0) & (x < cols) & (y >= 0) & (y < rows)
+    np.add.at(grid, (y[valid].astype(int), x[valid].astype(int)), 1)
+
+    new_grid = []
+    for panel in range(4):
+        start = panel * panel_size
+        end = min(start + panel_size, cols)
+        new_grid.append(grid[:, start:end])
+        if panel < 3:
+            new_grid.append(np.zeros((rows, 2)))
+    new_grid = np.hstack(new_grid)
+
+    max_count = np.max(new_grid) if new_grid.size else 0
+    ax.imshow(new_grid, cmap="Reds", origin="lower", vmax=max_count + 3, aspect="equal")
+
+    current_x = 0
+    for panel in range(4):
+        width = min(panel_size, max(cols - panel * panel_size, 0))
+        if width <= 0:
+            break
+        for xx in range(width + 1):
+            ax.axvline(current_x + xx - 0.5, color="black", linewidth=1)
+        for yy in range(rows + 1):
+            ax.axhline(yy - 0.5, xmin=current_x / new_grid.shape[1],
+                        xmax=(current_x + width) / new_grid.shape[1],
+                        color="black", linewidth=0.5)
+        current_x += width + 2
+
+    cluster_data = cluster_points_df[
+        cluster_points_df["StripID"].eq(strip_id) &
+        cluster_points_df["USMDevice"].astype(str).eq(str(device_name))
+    ].copy()
+
+    def raw_x_to_plot_x(raw_x):
+        x0 = int(raw_x) - 1
+        panel = x0 // panel_size
+        local_x = x0 % panel_size
+        return panel * (panel_size + 2) + local_x
+
+    if not cluster_data.empty:
+        # Cluster IDs restart from 0 for every panel, so cluster_id alone
+        # cannot be used to assign colours.  Use (panel, cluster_id) as the
+        # unique cluster key so clusters in different panels get different
+        # colours within the same strip.
+        cluster_keys = (
+            cluster_data[["panel", "cluster_id"]]
+            .drop_duplicates()
+            .sort_values(["panel", "cluster_id"])
+            .itertuples(index=False, name=None)
+        )
+        cluster_keys = list(cluster_keys)
+
+        # Use the 20-colour categorical palette.  If a strip contains more
+        # than 20 clusters, colours cycle only after all 20 colours are used.
+        palette = plt.cm.tab20(np.arange(20))
+        colour_map = {
+            key: palette[i % 20]
+            for i, key in enumerate(cluster_keys)
+        }
+
+        for _, point in cluster_data.iterrows():
+            key = (point["panel"], point["cluster_id"])
+            colour = colour_map[key]
+            plot_x = raw_x_to_plot_x(point["stripX"])
+            plot_y = int(point["stripY"]) - 1
+            ax.add_patch(plt.Rectangle(
+                (plot_x - 0.5, plot_y - 0.5), 1, 1,
+                facecolor=colour, edgecolor="black", linewidth=1, zorder=8
+            ))
+
+    ax.set_title(f"Method 1 — DBSCAN Clusters | {device_name} | Strip: {strip_id}",
+                 fontsize=12, fontweight="bold")
+    ax.axis("off")
+    ax.invert_xaxis()
+    ax.invert_yaxis()
+    return ax
+
+
+def create_method1_plot(result, device=None, criteria=None, strip_id=None, plot_df=None):
+    """Return a DBSCAN strip map as PNG bytes.
+
+    If ``strip_id`` is supplied, that user-selected strip is plotted.
+    Otherwise the highest-ranked strip in ``strip_summary`` is used.
+    ``plot_df`` can be supplied separately so the background reject map can
+    use the full date-range data even when an analysis filter was applied.
+    """
+    cluster_points_df = result.get("cluster_point_df", pd.DataFrame())
+    strip_summary = result.get("strip_summary", pd.DataFrame())
+    data = plot_df if plot_df is not None else result.get("data", pd.DataFrame())
+
+    if strip_id is None:
+        if strip_summary.empty:
+            return None
+        top = strip_summary.iloc[0]
+        strip_id = top["StripID"]
+        device_name = str(top["USMDevice"])
+    else:
+        if device is None:
+            if strip_summary.empty:
+                return None
+            matches = strip_summary[strip_summary["StripID"].astype(str).eq(str(strip_id))]
+            if matches.empty:
+                return None
+            device_name = str(matches.iloc[0]["USMDevice"])
+        else:
+            device_name = str(device)
+
+    fig, ax = plt.subplots(figsize=(12, 6.5))
+    plot_dbscan_clusters(
+        data, cluster_points_df, strip_id, device_name, ax,
+        device_config=result.get("device_config"),
+    )
+    # Total reject count for the selected strip (using the same data
+    # passed to the plot, i.e. the current date-range/filter selection).
+    if data is not None and not data.empty and "StripID" in data.columns:
+        strip_mask = (
+            data["StripID"].astype(str).eq(str(strip_id))
+            & data["USMDevice"].astype(str).eq(str(device_name))
+        )
+        total_rejects = int(strip_mask.sum())
+    else:
+        total_rejects = 0
+
+    title = (
+        f"Method 1 — DBSCAN | {device_name} | Strip: {strip_id} "
+        f"| Total Rejects: {total_rejects:,}"
+    )
+    if criteria is not None:
+        title += f" | Criteria {criteria}"
+    ax.set_title(title, fontsize=15, fontweight="bold")
+    fig.tight_layout()
+    buffer = io.BytesIO()
+    fig.savefig(buffer, format="png", dpi=160, bbox_inches="tight", facecolor="white")
+    plt.close(fig)
+    return buffer.getvalue()
+
+
+def run_method2(df, devices, device_config, strips_a, strips_b, n_perm=500, random_state=42, grid_size=6, top_n=10, p_threshold=5):
+    devices = [str(d) for d in devices]
+    data = transform_panel_coordinates_multi(df, devices, device_config)
+    data = add_spatial_bins(data, grid_size)
+    matrix = build_strip_bin_matrix(data)
+    actual_jsd = calculate_jsd_from_strips(matrix, strips_b, strips_a)
+    permutation_values = permutation_jsd(data, strips_a, strips_b, n_perm=n_perm, random_state=random_state)
+    stats = summarize_permutation_jsd(permutation_values, actual_jsd, p_threshold=p_threshold)
+    contribution_df = build_jsd_contribution_table(matrix, strips_b, strips_a)
+    contribution_df["delta"] = contribution_df["current_prob"] - contribution_df["reference_prob"]
+    contribution_df["sign"] = np.sign(contribution_df["delta"])
+    contribution_df["signed_jsd_contribution"] = contribution_df["jsd_contribution_pct"] * contribution_df["sign"]
+    top_bins = get_top_jsd_bins(contribution_df, top_n=top_n)
+    actual_rejects = trace_method2_rejects(data, strips_b, top_bins)
+    result = {
+        "data": data,
+        "matrix": matrix,
+        "reference_strips": list(strips_a),
+        "current_strips": list(strips_b),
+        "actual_jsd": actual_jsd,
+        "permutation_jsd": permutation_values,
+        "stats": stats,
+        "contribution_df": contribution_df,
+        "top_bins": top_bins,
+        "actual_rejects": actual_rejects,
+        "devices": devices,
+    }
+    result["contribution_map_png"] = _method2_contribution_map(result, top_n=top_n)
+    return result
+
+
+def trace_method2_rejects(data, current_strips, top_bins):
+    if top_bins is None or top_bins.empty:
+        return pd.DataFrame()
+    current_df = data[
+        data["StripID"].isin(current_strips)
+        & data["UserRejectCode"].astype(str).str.strip().eq("TA")
+    ].copy()
+    out = current_df.merge(top_bins[["bin_id", "bin_rank", "jsd_contribution_pct"]], on="bin_id", how="inner")
+    if out.empty:
+        return pd.DataFrame()
+    out["method"] = "Method 2"
+    out["reject_role"] = "Current batch"
+    preferred = [
+        "method", "reject_role", "bin_rank", "bin_id", "jsd_contribution_pct",
+        "MESLotID", "StripID", "USMDevice", "stripX", "stripY", "Data", "UserRejectCode", "MachineRejectCode"
+    ]
+    cols = [c for c in preferred if c in out.columns] + [c for c in out.columns if c not in preferred]
+    return out[cols].sort_values(["bin_rank", "StripID"], kind="stable").reset_index(drop=True)
+
+
+def create_method2_plot(result, device, criteria=None):
+    """Return Method 2 permutation-JSD distribution as PNG bytes."""
+    values = np.asarray(result.get("permutation_jsd", []), dtype=float)
+    values = values[np.isfinite(values)]
+    stats = result.get("stats", {})
+    actual = float(stats.get("actual_jsd", np.nan))
+    mean = float(stats.get("permutation_mean", np.nan))
+    fig, ax = plt.subplots(figsize=(12, 6.5))
+    if len(values):
+        ax.hist(values, bins=30, alpha=0.75, label="Permutation JSD")
+    if np.isfinite(mean):
+        ax.axvline(mean, linestyle="--", linewidth=1.2, label=f"Permutation mean = {mean:.6f}")
+    if np.isfinite(actual):
+        ax.axvline(actual, linestyle="-", linewidth=1.8, label=f"Actual JSD = {actual:.6f}")
+    p_pct = stats.get("p_pct", np.nan)
+    significance = "SIGNIFICANT" if stats.get("significant", False) else "NOT SIGNIFICANT"
+    title = f"Method 2 — Permutation JSD | {device}"
+    if criteria is not None:
+        title += f" | Criteria {criteria}"
+    ax.set_title(title, fontsize=15, fontweight="bold")
+    ax.set_xlabel("JSD")
+    ax.set_ylabel("Frequency")
+    ax.grid(True, alpha=0.25)
+    ax.legend(loc="best")
+    if np.isfinite(p_pct):
+        ax.text(0.98, 0.97, f"p% = {p_pct:.2f}\n{significance}", transform=ax.transAxes,
+                ha="right", va="top", bbox=dict(boxstyle="round,pad=0.4", facecolor="white", edgecolor="black"))
+    fig.tight_layout()
+    buffer = io.BytesIO()
+    fig.savefig(buffer, format="png", dpi=160, bbox_inches="tight", facecolor="white")
+    plt.close(fig)
+    return buffer.getvalue()
+
