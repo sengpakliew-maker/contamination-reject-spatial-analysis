@@ -1,0 +1,20 @@
+{
+    "VEGA": {
+        "rows": 15,
+        "cols": 64,
+        "panel_size": 16,
+        "criteria": "A"
+    },
+    "SOLARIS-XRF3": {
+        "rows": 17,
+        "cols": 76,
+        "panel_size": 19,
+        "criteria": "A"
+    },
+    "SQUID-ICD82PRV": {
+        "rows": 17,
+        "cols": 72,
+        "panel_size": 18,
+        "criteria": "B"
+    }
+}
