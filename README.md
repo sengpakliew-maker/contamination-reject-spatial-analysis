@@ -69,7 +69,7 @@ The tool provides a common workflow from raw production data to spatial analysis
 It is not intended to replace engineering judgment. Instead, it acts as a **screening and prioritization layer** between large-scale production data and detailed investigation such as physical inspection, SEM/EDX analysis, and process troubleshooting.
 
 <p align="center">
-  <img src="images/Why-difficult.png" alt="Why difficult" width="1000">
+  <img src="images/Tool-function.png" alt="Why difficult" width="1000">
   <br>
 </p>
 
