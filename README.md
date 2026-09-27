@@ -68,32 +68,10 @@ The tool provides a common workflow from raw production data to spatial analysis
 
 It is not intended to replace engineering judgment. Instead, it acts as a **screening and prioritization layer** between large-scale production data and detailed investigation such as physical inspection, SEM/EDX analysis, and process troubleshooting.
 
-## Without spatial analysis:
-
-```mermaid
-flowchart TD
-    A[Large Production Population] --> B[Manual Review]
-    B --> C[Large Investigation Space]
-
-    classDef problem fill:#FFF1F1,stroke:#C45B5B,stroke-width:1.5px,color:#1F2937;
-    class A,B,C problem;
-```
-
-## With the analysis tool:
-
-```mermaid
-flowchart TD
-    A[Large Production Data] --> B[Spatial Analysis]
-    B --> C[Prioritized Pattern / Changed Region]
-    C --> D[Smaller Investigation Space]
-
-    classDef input fill:#E8F1FF,stroke:#4A78C2,stroke-width:1.5px,color:#1F2937;
-    classDef process fill:#F3F4F6,stroke:#6B7280,stroke-width:1.5px,color:#1F2937;
-    classDef output fill:#EAF7EE,stroke:#4A9B68,stroke-width:1.5px,color:#1F2937;
-    class A input;
-    class B,C process;
-    class D output;
-```
+<p align="center">
+  <img src="images/Why-difficult.png" alt="Why difficult" width="1000">
+  <br>
+</p>
 
 
 ## Two Analysis Paths
