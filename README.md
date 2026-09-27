@@ -48,6 +48,11 @@ Compared with historical production, has the current lot developed a different p
 
 These two questions form the basis of the **Contamination Reject Pattern Analysis Tool**.
 
+<p align="center">
+  <img src="images/Why-difficult.png" alt="Why difficult" width="1000">
+  <br>
+</p>
+
 ---
 
 ## What Is This Tool?
@@ -78,7 +83,7 @@ flowchart TD
 
 ```mermaid
 flowchart TD
-    A[Large Production Population] --> B[Spatial Analysis]
+    A[Large Production Data] --> B[Spatial Analysis]
     B --> C[Prioritized Pattern / Changed Region]
     C --> D[Smaller Investigation Space]
 
