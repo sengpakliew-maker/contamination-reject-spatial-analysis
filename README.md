@@ -136,7 +136,7 @@ This comparison can also be used to **monitor the effectiveness of improvement a
 <p align="center">↓</p>
 
 <p align="center">
-  <img src="images/method-2-legend.png" alt="Method 2 result legend" width="700">
+  <img src="images/method-2-legend.png" alt="Method 2 result legend" width="1100">
   <br>
   <sub><b>3. Result Legend — Interpreting the Pattern Difference</b><br>
   The legend shows how the spatial contribution values should be interpreted.</sub>
